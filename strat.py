@@ -25,6 +25,17 @@ REF_CFG = dict(
     VOLTGT_WIN=40,       # lookback (days) for realised daily-PnL vol
     VOLTGT_CAP=1.6,      # max leverage multiplier from vol targeting
     BETA_ON_ALGO=True,   # hedge net beta with ALGO (True == reference)
+    # --- hedge-on-realised-book fix -------------------------------------------
+    HEDGE_CLIPPED=False, # size the ALGO hedge on the POST-clip book we actually
+                         #   hold, not the pre-clip target.  The grader clips
+                         #   every name to POSLIM, so with a heavily clipped book
+                         #   the pre-clip hedge is sized against a book we do not
+                         #   own -> large residual market beta.
+    HEDGE_NOSMOOTH=True, # when HEDGE_CLIPPED, set ALGO directly instead of
+                         #   easing into it (ALGO commission is 1/5, so tracking
+                         #   the hedge exactly is cheap).
+    POSLIM=10_000.0,     # per-name dollar position limit (problem spec)
+    POSLIM0=100_000.0,   # ALGO dollar position limit (problem spec)
 )
 
 
@@ -40,6 +51,8 @@ def make_strategy(cfg=None):
     GATE, GATE_WIN, GATE_FLOOR, GATE_CAP = c["GATE"], c["GATE_WIN"], c["GATE_FLOOR"], c["GATE_CAP"]
     VOLTGT, VOLTGT_WIN, VOLTGT_CAP = c["VOLTGT"], c["VOLTGT_WIN"], c["VOLTGT_CAP"]
     BETA_ON_ALGO = c["BETA_ON_ALGO"]
+    HEDGE_CLIPPED, HEDGE_NOSMOOTH = c["HEDGE_CLIPPED"], c["HEDGE_NOSMOOTH"]
+    POSLIM, POSLIM0 = c["POSLIM"], c["POSLIM0"]
 
     zwin_list = ZWINS if ZWINS else [ZWIN]
     max_zwin = max(zwin_list)
@@ -163,13 +176,15 @@ def make_strategy(cfg=None):
         target[names] = dollars / px[names]
 
         # --- 4. beta hedge with ALGO ---
+        betas = None
         if BETA_ON_ALGO:
             algo_var = algo_r[-BETAWIN:].var() + 1e-12
             betas = np.array([
                 np.cov(rets[i, -BETAWIN:], algo_r[-BETAWIN:])[0, 1] / algo_var
                 for i in names])
-            net_beta_dollars = np.sum(betas * dollars)
-            target[0] = -net_beta_dollars / px[0]
+            if not HEDGE_CLIPPED:
+                net_beta_dollars = np.sum(betas * dollars)
+                target[0] = -net_beta_dollars / px[0]
 
         # --- track realised daily PnL for vol targeting (uses prev target) ---
         if state["prev_target_dollars"] is not None and state["prev_px"] is not None:
@@ -182,6 +197,21 @@ def make_strategy(cfg=None):
 
         # --- 5. inertia: move partway to target ---
         newpos = prev + SMOOTH * (target - prev)
+
+        # --- 6. hedge the book we ACTUALLY hold -------------------------------
+        # The grader clips every constituent to POSLIM dollars, and this book
+        # runs heavily clipped, so a hedge sized on the pre-clip target is sized
+        # against positions we do not own.  Apply the same clip ourselves, then
+        # hedge the surviving book.
+        if BETA_ON_ALGO and HEDGE_CLIPPED:
+            lim_sh = POSLIM / px
+            held = np.clip(newpos[names], -lim_sh[names], lim_sh[names])
+            net_beta_dollars = np.sum(betas * (held * px[names]))
+            algo_sh = -net_beta_dollars / px[0]
+            lim0 = POSLIM0 / px[0]
+            algo_sh = float(np.clip(algo_sh, -lim0, lim0))
+            newpos[0] = algo_sh if HEDGE_NOSMOOTH else prev[0] + SMOOTH * (algo_sh - prev[0])
+
         state["prev"] = newpos.copy()
         return newpos.astype(int)
 

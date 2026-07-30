@@ -11,73 +11,93 @@ import numpy as np
 #   - The 50 constituents carry a weak, REGIME-DEPENDENT factor-neutral
 #     reversal. Strip the common factors out with PCA, cumulate the residual
 #     into a mean-reverting spread, z-score it, and fade the deviation.
-#   - Score = mean_daily_PnL * SR^2/(SR^2+1). Sharpe is scale-invariant, so the
-#     score rewards a bigger book as long as Sharpe holds -> size up to, but not
-#     past, the point where position limits and the ALGO hedge saturate.
+#   - Score = mean_daily_PnL * SR^2/(SR^2+1), so score can never exceed mean
+#     daily PnL. With every name capped at $10k the whole constituent book is
+#     capped at $500k, which bounds how large a score is reachable at all.
+#
+# THE HEDGE MUST BE SIZED ON THE BOOK WE ACTUALLY HOLD
+#   This is the single most important correctness point in this file. The
+#   grader clips every constituent to POSLIM dollars. Sizing the ALGO hedge
+#   against the *pre-clip* target therefore hedges positions we do not own:
+#   measured over days 625-750, intended net beta exposure was +-$6.3k while
+#   REALISED exposure was +-$56.4k, a 9x error, with a persistent net short of
+#   $16k. That is why 4 of the 5 worst days in that window were days the market
+#   rallied +1.5% to +3.0%, and why the strategy lost $237/day across a regime
+#   in which the reversal edge itself was working fine (residual AC -0.021).
+#   Clipping the target ourselves before computing the hedge cuts mean absolute
+#   residual beta from $56,397 to $610 (92x) and unpins ALGO from its cap
+#   (41% of days -> 3%). ALGO is set directly rather than eased into, because
+#   its commission is 1/5 and tracking the hedge exactly is cheap.
 #
 # HOW THE PARAMETERS WERE CHOSEN
-#   Residual autocorrelation is strongly negative in some sub-windows and
-#   near-zero in others, so a config that looks good on the full 250 days can be
-#   pure regime luck. Every number below was picked by its WORST window score
-#   across SIX different slicings (3x125, 5x100, seq100, roll100/50,
-#   75-postwarm, wf125/62) -- "min-of-worsts" -- never on the full-250 alone.
+#   The edge is regime-dependent, so a config is judged on its WORST window
+#   across many slicings of the full 1000-day history (see stress1000.py),
+#   never on the full-250 headline. Chasing that headline is exactly how the
+#   previous config went wrong: it scored 149.7 on the last 250 days while
+#   making only $71/day at Sharpe 0.77 across all 500 genuinely unseen days.
 #
-#   ENTRY   = 1.4   z deadband. Only trade names whose deviation is meaningfully
-#                   large; kills noise churn where there is no edge. Commission
-#                   drag in the quiet window falls to ~8% (reference: ~21%).
-#   GROSS   = 1.9M  A dense grid (ENTRY {1.3,1.4,1.5} x GROSS 900k-3.0M, all six
-#                   slicings) shows a single smooth peak here: min-of-worsts 39.0
-#                   vs 27.8 for the previous best (ENTRY 1.3 / GROSS 1.0M) and
-#                   0.7 for the un-tuned reference. Above ~2.2M it falls off a
-#                   cliff as the ALGO hedge saturates its 100k cap. The book runs
-#                   55-65% clipped at per-name limits, so much of the nominal
-#                   target is deliberately inert -- that is understood, not a bug.
-#   SMOOTH  = 0.35  Inertia. With the deadband cutting turnover, lighter inertia
-#                   tracks the cleaner target without adding churn.
-#   NFACT   = 5     Kept from the reference; the score is genuinely sensitive to
-#   BETAWIN = 120   both, so these are the fragile knobs -- we do not push them
-#                   and we do not add leverage that amplifies their cliff.
-#   ZWIN=15, VOLWIN=60, ZCLIP=3.0 also inherited from the reference.
+#   ENTRY   = 1.8   z deadband. Higher than it looks like it should be: across
+#                   six slicings ENTRY 1.8 gives min-of-worsts -84 vs -160 at
+#                   1.4 and -190 at 1.6. (ENTRY 2.0 looks better still on one
+#                   slicing at -7.6, but is -120.6 across all six -- a single-
+#                   slicing artifact of exactly the kind that burned us before.)
+#   GROSS   = 900k  Down from 1.9M. Once the hedge is correct, a smaller book
+#                   is both safer and better: min-of-worsts -84.3, all-unseen
+#                   score 85.1 at Sharpe 1.77, versus -388.5 / 26.2 / 0.77 for
+#                   the old 1.9M config. Larger GROSS mostly buys more clipping,
+#                   and clipping is what corrupts the hedge.
+#   SMOOTH  = 0.35  Inertia on the constituent book (ALGO bypasses it).
+#   NFACT   = 5     Inherited; the score is genuinely sensitive to both, so
+#   BETAWIN = 120   these are left alone rather than fitted.
+#   ZWIN=15, VOLWIN=60, ZCLIP=3.0 also inherited.
 #
-#   Final numbers: full-250 score 131.35 (Sharpe 1.97), min-of-worsts 39.0,
-#   3x125 breakdown 94.8 / 57.4 / 184.4.
+# HONEST STATE OF THE EVIDENCE
+#   - The hedge fix is validated OUT OF SAMPLE: measured at the untouched old
+#     parameters on 500 days the config had never seen, it moved the all-unseen
+#     score from 26.2 to 39.8 before any retuning.
+#   - The ENTRY/GROSS retune on top is fitted to all 1000 visible days and is
+#     therefore NOT out-of-sample evidence. It is a reasonable bet, not a
+#     measured result. Anything added from here should hold out days 750-1000.
+#   - The worst window is still NEGATIVE (-84). This strategy has regimes in
+#     which it loses money. The bleeding is ~5x smaller, not cured.
 #
 # TRIED AND REJECTED (do not reintroduce)
-#   - GATE ('autocorr' / 'hitrate') edge gating: collapses min-of-worsts to ~2.
-#   - VOLTGT (vol targeting on realised daily PnL): collapses it to ~0-1.
-#   Both shrink gross exactly during the quiet/choppy regime that the ENTRY
-#   deadband was already built to survive, so they de-risk at the worst moment
-#   and double-count a fragility this config already handles.
+#   - GATE ('autocorr' / 'hitrate') and VOLTGT. Re-tested on the full 1000 days
+#     after a real loss regime became visible, in case the earlier verdict was
+#     an artifact of a too-easy sample: every variant was still worse on the
+#     worst window (-77 to -91 vs -70 for plain). They shrink gross during the
+#     quiet regime the ENTRY deadband already handles.
 #
-# SUBMISSION HARDENING (guards only -- the strategy math is untouched, and
-# output is bit-identical to the tuned version on clean data)
-#   - Prices are sanitised: non-finite / non-positive values are forward-filled,
-#     and a name with no usable price is held flat. One bad tick used to turn
-#     the whole book to NaN, which .astype(int) rendered as INT_MIN and the
-#     grader's clip turned into every name pinned at max short -- permanently,
-#     since the state stayed poisoned. That path is now unreachable.
-#   - Positions are finite-clamped before the integer cast, so a non-finite
-#     value can never reach the grader as INT_MIN garbage.
-#   - The model is wrapped: on any unexpected failure we HOLD yesterday's book
-#     (no turnover, no commission) instead of raising.
-#   - All dimensions derive from prcSoFar.shape; nothing is hardcoded to 51
-#     instruments. Degenerate universes return a correctly-sized flat book.
-#   - State is validated on every call: it re-initialises on the first call, on a
-#     universe-size change, or if the call sequence is not a contiguous forward
-#     walk -- so a restarted or replayed pass cannot inherit a stale book. A
-#     normal eval.py run is strictly contiguous, so this never fires there.
+# SUBMISSION HARDENING (guards; no effect on clean data)
+#   - Non-finite / non-positive prices are forward-filled; a name with no usable
+#     price is held flat. Previously one bad tick turned the book to NaN, which
+#     .astype(int) rendered as INT_MIN and the grader's clip turned into every
+#     name pinned at max short, permanently.
+#   - Positions are finite-clamped before the integer cast.
+#   - On any unexpected failure we hold yesterday's book instead of raising.
+#   - All dimensions derive from prcSoFar.shape; degenerate universes return a
+#     correctly sized flat book.
+#   - State re-initialises on the first call, a universe-size change, or a
+#     non-contiguous call sequence, so a restarted pass cannot inherit a stale
+#     book. A normal eval.py run is strictly contiguous, so this never fires.
+#
+# ASSUMPTION: POSLIM / POSLIM0 below mirror the position limits in the problem
+# spec (eval.py). If a future stage changes those limits, update them here --
+# the hedge is sized against them.
 # ============================================================================
 
 # --- hyperparameters (worst-window robustness, not full-250 peak) ------------
 NFACT   = 5           # PCA factors removed from constituent returns
 ZWIN    = 15          # lookback (days) for the residual-spread z-score
 VOLWIN  = 60          # lookback (days) for inverse-idiosyncratic-vol sizing
-GROSS   = 1_900_000.0 # target gross dollar exposure across the constituent book
+GROSS   = 900_000.0   # target gross dollar exposure across the constituent book
 SMOOTH  = 0.35        # fraction of the gap to target we close each day (inertia)
 ZCLIP   = 3.0         # winsorise z-scores to tame outliers
 BETAWIN = 120         # lookback for factor loadings and ALGO betas
-ENTRY   = 1.4         # z deadband: ignore |z| < ENTRY (turnover / commission cut)
+ENTRY   = 1.8         # z deadband: ignore |z| < ENTRY (turnover / commission cut)
 WARMUP  = ZWIN + BETAWIN + 5   # 140 days of history before the first live trade
+POSLIM  = 10_000.0    # per-name dollar position limit (problem spec)
+POSLIM0 = 100_000.0   # ALGO dollar position limit (problem spec)
 # -----------------------------------------------------------------------------
 
 _MAXPOS = 1e12        # finite clamp so the integer cast can never emit INT_MIN
@@ -99,11 +119,9 @@ def _sanitise(prc):
 
     t = prc.shape[1]
     dead = bad.all(axis=1)
-    # forward-fill: carry the index of the most recent good observation
     idx = np.where(~bad, np.arange(t)[None, :], -1)
-    np.maximum.accumulate(idx, axis=1, out=idx)
-    # leading bad values have no earlier good price -> back-fill from the first
-    first_good = np.argmax(~bad, axis=1)
+    np.maximum.accumulate(idx, axis=1, out=idx)      # carry last good index
+    first_good = np.argmax(~bad, axis=1)             # back-fill leading gaps
     idx = np.where(idx < 0, first_good[:, None], idx)
     prc = np.take_along_axis(prc, idx, axis=1)
     prc[dead] = 1.0        # harmless placeholder; these names are forced flat
@@ -111,7 +129,11 @@ def _sanitise(prc):
 
 
 def _target_book(prc, dead):
-    """Desired book in shares. Identical math to the tuned config."""
+    """Desired CONSTITUENT book in shares, plus the ALGO betas.
+
+    target[0] is deliberately left at zero: the hedge is applied later, against
+    the post-clip book we will actually hold.
+    """
     nins = prc.shape[0]
     names = np.arange(1, nins)
 
@@ -154,17 +176,11 @@ def _target_book(prc, dead):
     target = np.zeros(nins)
     target[names] = dollars / px[names]
 
-    # 4. hedge net market beta with ALGO (cheap, 10x limit). On this file the
-    #    PCA residual is already near-neutral so the hedge barely moves the
-    #    in-sample score, but it is the only structural guard against a future
-    #    regime where the book picks up market beta.
+    # 4. betas vs ALGO, used by the caller to hedge the realised book
     algo_var = algo_r[-BETAWIN:].var() + 1e-12
     betas = np.array([np.cov(rets[i, -BETAWIN:], algo_r[-BETAWIN:])[0, 1] / algo_var
                       for i in names])
-    net_beta_dollars = np.sum(betas * dollars)
-    if not dead[0]:
-        target[0] = -net_beta_dollars / px[0]
-    return target
+    return target, betas
 
 
 def getMyPosition(prcSoFar):
@@ -176,8 +192,8 @@ def getMyPosition(prcSoFar):
     nins, t = prc.shape
 
     # --- state validation: first call, universe change, or a non-contiguous
-    #     call sequence (restart / replay / gap) all start from a flat book, so
-    #     a fresh pass can never silently inherit stale positions.
+    #     call sequence all start from a flat book, so a fresh pass can never
+    #     silently inherit stale positions.
     if (_prev is None or _prev.shape[0] != nins
             or _last_t is None or t != _last_t + 1):
         _prev = np.zeros(nins)
@@ -189,18 +205,35 @@ def getMyPosition(prcSoFar):
         return np.zeros(nins, dtype=int)
 
     prc, dead = _sanitise(prc)
+    px = prc[:, -1]
 
     try:
-        target = _target_book(prc, dead)
+        target, betas = _target_book(prc, dead)
     except Exception:
-        target = None
+        target, betas = None, None
 
     # unusable target -> hold yesterday's book rather than trade on garbage
     if target is None or target.shape != (nins,) or not np.all(np.isfinite(target)):
-        target = _prev.copy()
+        target, betas = _prev.copy(), None
 
-    # --- move partway to target (inertia cuts turnover and PnL variance) -----
+    # --- inertia on the constituent book ------------------------------------
     newpos = _prev + SMOOTH * (target - _prev)
+
+    # --- hedge the book we ACTUALLY hold ------------------------------------
+    # Apply the grader's per-name clip ourselves, then size ALGO against what
+    # survives it. ALGO is set directly (not smoothed): its commission is 1/5,
+    # so tracking the hedge exactly is cheap, and lagging it re-introduces the
+    # very beta drift this is here to remove.
+    if betas is not None and not dead[0]:
+        names = np.arange(1, nins)
+        lim_sh = POSLIM / px[names]
+        held = np.clip(newpos[names], -lim_sh, lim_sh)
+        net_beta_dollars = np.sum(betas * (held * px[names]))
+        algo_sh = -net_beta_dollars / px[0]
+        lim0 = POSLIM0 / px[0]
+        if np.isfinite(algo_sh) and np.isfinite(lim0):
+            newpos[0] = float(np.clip(algo_sh, -lim0, lim0))
+
     if not np.all(np.isfinite(newpos)):
         newpos = np.where(np.isfinite(newpos), newpos, 0.0)
     np.clip(newpos, -_MAXPOS, _MAXPOS, out=newpos)
