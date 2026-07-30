@@ -46,7 +46,19 @@ import numpy as np
 #                   score 85.1 at Sharpe 1.77, versus -388.5 / 26.2 / 0.77 for
 #                   the old 1.9M config. Larger GROSS mostly buys more clipping,
 #                   and clipping is what corrupts the hedge.
-#   SMOOTH  = 0.35  Inertia on the constituent book (ALGO bypasses it).
+#   SMOOTH  = 0.35  Inertia on the constituent book (ALGO bypasses it). A final
+#                   pre-submission sweep confirmed higher SMOOTH (faster
+#                   tracking) and lower GROSS keep cutting the worst window
+#                   further (e.g. S=0.8/G=350k -> worst -30.3), but that is not
+#                   a free improvement: it also cuts the MEAN score and the
+#                   all-1000-day score by roughly the same proportion (all-1000
+#                   score 67.7 -> 35.5, Sharpe 1.60 -> 1.38). Every lever tried
+#                   (SMOOTH, GROSS, factor-count ensembling) sits on the same
+#                   risk/return frontier: none dominates on both worst-case and
+#                   mean at once, unlike the hedge fix, which improved both
+#                   simultaneously with no retuning. SMOOTH=0.35 is kept as the
+#                   considered point on that frontier rather than sliding
+#                   further toward risk-aversion without a clear reason to.
 #   NFACT   = 5     Inherited; the score is genuinely sensitive to both, so
 #   BETAWIN = 120   these are left alone rather than fitted.
 #   ZWIN=15, VOLWIN=60, ZCLIP=3.0 also inherited.
@@ -57,16 +69,20 @@ import numpy as np
 #     score from 26.2 to 39.8 before any retuning.
 #   - The ENTRY/GROSS retune on top is fitted to all 1000 visible days and is
 #     therefore NOT out-of-sample evidence. It is a reasonable bet, not a
-#     measured result. Anything added from here should hold out days 750-1000.
+#     measured result.
 #   - The worst window is still NEGATIVE (-84). This strategy has regimes in
-#     which it loses money. The bleeding is ~5x smaller, not cured.
+#     which it loses money. The bleeding is ~5x smaller than pre-fix, not cured.
 #
 # TRIED AND REJECTED (do not reintroduce)
-#   - GATE ('autocorr' / 'hitrate') and VOLTGT. Re-tested on the full 1000 days
-#     after a real loss regime became visible, in case the earlier verdict was
-#     an artifact of a too-easy sample: every variant was still worse on the
-#     worst window (-77 to -91 vs -70 for plain). They shrink gross during the
-#     quiet regime the ENTRY deadband already handles.
+#   - GATE ('autocorr' / 'hitrate') and VOLTGT: worse on the worst window
+#     (-77 to -91 vs -70 for plain) across the full 1000 days.
+#   - Higher SMOOTH (0.5-0.9) with lower GROSS (300k-700k), and NFACTS
+#     factor-count ensembling ([3,5,8] etc.): each cuts the worst window
+#     substantially but cuts mean/all-1000 score by a similar or larger
+#     proportion (e.g. worst -84.3 -> -30.3 alongside all-1000 score
+#     67.7 -> 35.5). A risk/return tradeoff, not a strict improvement, so not
+#     adopted with one submission remaining and no way to know which regime
+#     the grading window will land in.
 #
 # SUBMISSION HARDENING (guards; no effect on clean data)
 #   - Non-finite / non-positive prices are forward-filled; a name with no usable
