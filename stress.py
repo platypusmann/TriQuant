@@ -57,6 +57,7 @@ FINALISTS = {
     "e1.4 s0.35 g1.3M":     {"ENTRY": 1.4, "SMOOTH": 0.35, "GROSS": 1_300_000.0},
     "e1.3 s0.35 g1.0M":     {"ENTRY": 1.3, "SMOOTH": 0.35, "GROSS": 1_000_000.0},
     "e1.5 s0.35 g1.0M":     {"ENTRY": 1.5, "SMOOTH": 0.35, "GROSS": 1_000_000.0},
+    "e1.4 s0.35 g1.9M":     {"ENTRY": 1.4, "SMOOTH": 0.35, "GROSS": 1_900_000.0},
 }
 
 sets = slicing_sets()
