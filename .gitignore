@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.log
+
+# machine-local Claude Code settings (shared .claude/settings.json is fine)
+.claude/settings.local.json
